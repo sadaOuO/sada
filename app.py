@@ -25,21 +25,102 @@ CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 SUPER_ADMIN_ID = os.environ.get("SUPER_ADMIN_ID", "")  # 你的 LINE user ID
 print(f"TOKEN length: {len(ACCESS_TOKEN)}")
 
+# ── 雲端資料庫（Upstash Redis）設定 ──────────────────────────
+# 用來讓資料在 Render 重啟/重新部署後不會消失
+REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+def redis_enabled():
+    return bool(REDIS_URL and REDIS_TOKEN)
+
+def redis_cmd(*args):
+    """向 Upstash 送出一個 Redis 指令，例如 redis_cmd('SET', 'key', 'value')"""
+    if not redis_enabled():
+        return None
+    try:
+        resp = requests.post(
+            REDIS_URL,
+            headers={"Authorization": f"Bearer {REDIS_TOKEN}", "Content-Type": "application/json"},
+            json=list(args),
+            timeout=5,
+        )
+        return resp.json().get("result")
+    except Exception as e:
+        print(f"[Redis] 指令失敗 {args[0] if args else ''}: {e}")
+        return None
+
+if redis_enabled():
+    print("[INIT] 已連接雲端資料庫（Upstash Redis），資料將永久保存")
+else:
+    print("[WARN] 未設定 Upstash Redis，資料僅存在記憶體中，重啟後會消失")
+
 # ── 資料儲存 ───────────────────────────────────────────────
 # 管理員 { userid: {"name": "佐田", "role": "super"/"admin", "expire": None/datetime} }
 admins = {}
-if SUPER_ADMIN_ID:
-    admins[SUPER_ADMIN_ID] = {"name": "佐田", "role": "super", "expire": None}
-    print(f"[INIT] SUPER_ADMIN_ID 已載入：{SUPER_ADMIN_ID}")
-else:
-    print("[WARN] 未設定 SUPER_ADMIN_ID，將沒有最高管理員！")
+
+def admins_to_json():
+    data = {}
+    for uid, info in admins.items():
+        data[uid] = {
+            "name": info["name"],
+            "role": info["role"],
+            "expire": info["expire"].isoformat() if info["expire"] else None,
+        }
+    return json.dumps(data, ensure_ascii=False)
+
+def admins_from_json(raw):
+    data = json.loads(raw)
+    result = {}
+    for uid, info in data.items():
+        expire = datetime.fromisoformat(info["expire"]) if info.get("expire") else None
+        result[uid] = {"name": info["name"], "role": info["role"], "expire": expire}
+    return result
+
+def save_admins():
+    if redis_enabled():
+        redis_cmd("SET", "sada:admins", admins_to_json())
+
+def load_admins():
+    global admins
+    raw = redis_cmd("GET", "sada:admins")
+    if raw:
+        try:
+            admins = admins_from_json(raw)
+            print(f"[INIT] 從資料庫載入 {len(admins)} 位管理員")
+        except Exception as e:
+            print(f"[ERROR] 載入管理員資料失敗：{e}")
+    if SUPER_ADMIN_ID and SUPER_ADMIN_ID not in admins:
+        admins[SUPER_ADMIN_ID] = {"name": "佐田", "role": "super", "expire": None}
+        save_admins()
+    if not redis_enabled():
+        print(f"[INIT] SUPER_ADMIN_ID 已載入（未持久化）：{SUPER_ADMIN_ID}")
+
+load_admins()
 
 # 群組資料 { room_id: {"total": 0.0, "history": [], "currency": "台幣", "boss": "", "enabled": True} }
 room_data = {}
 
+def save_room(room_id):
+    if redis_enabled() and room_id in room_data:
+        redis_cmd("SET", f"sada:room:{room_id}", json.dumps(room_data[room_id], ensure_ascii=False))
+
+def delete_room_remote(room_id):
+    if redis_enabled():
+        redis_cmd("DEL", f"sada:room:{room_id}")
+
+def load_room(room_id):
+    raw = redis_cmd("GET", f"sada:room:{room_id}")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception as e:
+            print(f"[ERROR] 載入群組 {room_id} 資料失敗：{e}")
+    return None
+
 def get_room(room_id):
     if room_id not in room_data:
-        room_data[room_id] = {"total": 0.0, "history": [], "currency": "台幣", "boss": "佐田", "enabled": True}
+        loaded = load_room(room_id)
+        room_data[room_id] = loaded if loaded else {"total": 0.0, "history": [], "currency": "台幣", "boss": "佐田", "enabled": True}
     return room_data[room_id]
 
 def get_room_id(source):
@@ -222,6 +303,7 @@ def handle(uid, room_id, text):
             name = parts[2]
             new_uid = parts[3].strip()
             admins[new_uid] = {"name": name, "role": "super", "expire": None}
+            save_admins()
             return [{"type": "text", "text": f"✅ 已新增最高管理員\n名字：{name}\nID：{new_uid}"}]
         else:
             return [{"type": "text", "text": "❌ 格式錯誤\n正確格式：\n0421@新增主管理員@名字@userid"}]
@@ -238,6 +320,7 @@ def handle(uid, room_id, text):
                 return [{"type": "text", "text": "❌ 天數必須是數字\n正確格式：\n@新增副管理員@名字@userid@天數"}]
             expire = datetime.now() + timedelta(days=days)
             admins[new_uid] = {"name": name, "role": "admin", "expire": expire}
+            save_admins()
             expire_str = expire.strftime("%Y/%m/%d")
             return [{"type": "text", "text": f"✅ 已新增副管理員\n名字：{name}\nID：{new_uid}\n到期時間：{expire_str}"}]
         else:
@@ -251,6 +334,7 @@ def handle(uid, room_id, text):
             if v["name"] == name and v["role"] != "super":
                 deleted = k
                 del admins[k]
+                save_admins()
                 break
         if deleted:
             return [{"type": "text", "text": f"✅ 已刪除管理員：{name}"}]
@@ -284,6 +368,7 @@ def handle(uid, room_id, text):
         for rid in list(room_data.keys()):
             if rid.endswith(target) or rid == target:
                 del room_data[rid]
+                delete_room_remote(rid)
                 deleted = rid
                 break
         if deleted:
@@ -310,20 +395,24 @@ def handle(uid, room_id, text):
         if len(parts) >= 3:
             rd["boss"] = parts[1]
             rd["currency"] = parts[2]
+            save_room(room_id)
             return [{"type": "text", "text": f"✅ 群組資訊已設定\n老闆：{parts[1]}\n幣別：{parts[2]}"}]
 
     # 刪除群組資訊
     if text == "/刪除群組資訊":
         rd["boss"] = "佐田"
         rd["currency"] = "台幣"
+        save_room(room_id)
         return [{"type": "text", "text": "✅ 群組資訊已重置"}]
 
     # 切換幣別
     if text in ("/台幣", "台幣"):
         rd["currency"] = "台幣"
+        save_room(room_id)
         return [{"type": "text", "text": "✅ 已切換為台幣"}]
     if text in ("/人民幣", "人民幣"):
         rd["currency"] = "人民幣"
+        save_room(room_id)
         return [{"type": "text", "text": "✅ 已切換為人民幣"}]
 
     # 查帳
@@ -338,6 +427,7 @@ def handle(uid, room_id, text):
     if text in ("/洁帳", "洁帳", "/清帳", "清帳"):
         rd["total"] = 0.0
         rd["history"] = []
+        save_room(room_id)
         return [{"type": "text", "text": "🗑️ 已清帳，總額歸零！"}]
 
     # 撤回
@@ -346,6 +436,7 @@ def handle(uid, room_id, text):
             return [{"type": "text", "text": "❌ 沒有可以撤回的紀錄"}]
         last = rd["history"].pop()
         rd["total"] -= last["result"]
+        save_room(room_id)
         total = rd["total"]
         if isinstance(total, float) and total.is_integer():
             total = int(total)
@@ -367,6 +458,7 @@ def handle(uid, room_id, text):
                 new_total = int(new_total)
             now = datetime.now().strftime("%m/%d %H:%M")
             rd["history"].append({"time": now, "expr": calc_part, "result": result, "note": note})
+            save_room(room_id)
             return [make_calc_flex(calc_part.lstrip("+"), result, prev_total, new_total, currency, boss, note)]
 
     return None  # 不認識的指令靜默
