@@ -7,7 +7,7 @@ import math
 import re
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 讀取 .env
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -22,13 +22,21 @@ if os.path.exists(env_path):
 app = Flask(__name__)
 ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+SUPER_ADMIN_ID = os.environ.get("SUPER_ADMIN_ID", "")  # 你的 LINE user ID
 print(f"TOKEN length: {len(ACCESS_TOKEN)}")
 
+# ── 資料儲存 ───────────────────────────────────────────────
+# 管理員 { userid: {"name": "佐田", "role": "super"/"admin", "expire": None/datetime} }
+admins = {}
+if SUPER_ADMIN_ID:
+    admins[SUPER_ADMIN_ID] = {"name": "佐田", "role": "super", "expire": None}
+
+# 群組資料 { room_id: {"total": 0.0, "history": [], "currency": "台幣", "boss": "", "enabled": True} }
 room_data = {}
 
 def get_room(room_id):
     if room_id not in room_data:
-        room_data[room_id] = {"total": 0.0, "history": [], "currency": "台幣"}
+        room_data[room_id] = {"total": 0.0, "history": [], "currency": "台幣", "boss": "佐田", "enabled": True}
     return room_data[room_id]
 
 def get_room_id(source):
@@ -44,6 +52,29 @@ def fmtn(n):
         n = int(n)
     return f"{n:,}"
 
+# ── 權限檢查 ───────────────────────────────────────────────
+def is_super(uid):
+    return uid in admins and admins[uid]["role"] == "super"
+
+def is_admin(uid):
+    if uid not in admins:
+        return False
+    admin = admins[uid]
+    if admin["role"] == "super":
+        return True
+    # 檢查是否過期
+    if admin["expire"] and datetime.now() > admin["expire"]:
+        return False
+    return True
+
+def check_expired_admins():
+    """通知即將到期的管理員（可選）"""
+    now = datetime.now()
+    for uid, info in list(admins.items()):
+        if info["expire"] and now > info["expire"] and info["role"] != "super":
+            pass  # 已過期，不刪除只是擋住
+
+# ── 簽名驗證 ───────────────────────────────────────────────
 def verify_signature(body, signature):
     mac = hmac.new(CHANNEL_SECRET.encode(), body.encode(), hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(mac).decode(), signature)
@@ -57,11 +88,9 @@ def reply_message(reply_token, messages):
         json={"replyToken": reply_token, "messages": messages},
     )
     print(f"Reply: {resp.status_code}")
-    if resp.status_code != 200:
-        print(f"Error: {resp.text}")
 
-# ── Flex 計算結果卡片 ──────────────────────────────────────
-def make_calc_flex(expr, result, prev_total, new_total, currency, note=""):
+# ── Flex 計算結果卡片 ───────────────────────────────────────
+def make_calc_flex(expr, result, prev_total, new_total, currency, boss, note=""):
     sign = "+" if result >= 0 else ""
     color_result = "#FF6B35" if result >= 0 else "#2196F3"
 
@@ -88,7 +117,7 @@ def make_calc_flex(expr, result, prev_total, new_total, currency, note=""):
                 ], "margin": "sm"},
                 {"type": "separator", "margin": "md"},
                 {"type": "box", "layout": "horizontal", "contents": [
-                    {"type": "text", "text": "目前欠佐田", "size": "sm", "weight": "bold", "flex": 1},
+                    {"type": "text", "text": f"目前欠{boss}", "size": "sm", "weight": "bold", "flex": 1},
                     {"type": "text", "text": f"{fmtn(new_total)} {currency}", "size": "sm", "weight": "bold", "color": "#FF6B35", "align": "end", "flex": 2}
                 ], "margin": "md"},
                 {"type": "box", "layout": "horizontal", "contents": [
@@ -105,24 +134,22 @@ def make_calc_flex(expr, result, prev_total, new_total, currency, note=""):
             "paddingAll": "8px"
         }
     }
-    return {"type": "flex", "altText": f"計算結果：欠佐田 {fmtn(new_total)} {currency}", "contents": bubble}
+    return {"type": "flex", "altText": f"計算結果：欠{boss} {fmtn(new_total)} {currency}", "contents": bubble}
 
-# ── 整合（文字格式，穩定不出錯）──────────────────────────
-def make_summary_text(history, total, currency):
+# ── 整合文字 ───────────────────────────────────────────────
+def make_summary_text(history, total, currency, boss):
     if not history:
         return f"目前沒有紀錄 📭\n總額：{fmtn(total)} {currency}"
-
     lines = ["📋 記帳整合", "━━━━━━━━━━━━━"]
     for i, h in enumerate(history[-15:]):
         note_str = f" 📝{h['note']}" if h.get('note') else ""
         sign = "+" if h['result'] >= 0 else ""
-        lines.append(f"{i+1}. {h['time'].replace(chr(10),' ')}｜{h['expr']}={fmtn(h['result'])}{note_str}")
-
+        lines.append(f"{i+1}. {h['time']}｜{h['expr']}={fmtn(h['result'])}{note_str}")
     lines.append("━━━━━━━━━━━━━")
     lines.append(f"✅ 總額：{fmtn(total)} {currency}")
     return "\n".join(lines)
 
-# ── 計算引擎 ──────────────────────────────────────────────
+# ── 計算引擎 ───────────────────────────────────────────────
 def safe_calc(expr):
     expr = expr.replace("×", "*").replace("÷", "/")
     expr = expr.replace("（", "(").replace("）", ")")
@@ -144,49 +171,159 @@ def safe_calc(expr):
     except:
         return None, "無法解析"
 
-# ── 指令處理 ──────────────────────────────────────────────
-def handle(room_id, text):
-    rd = get_room(room_id)
+# ── 指令處理 ───────────────────────────────────────────────
+def handle(uid, room_id, text):
     text = text.strip()
-    currency = rd["currency"]
 
+    # ── 任何人都能用 ──
+    # /ID
+    if text in ("/ID", "/id"):
+        return [{"type": "text", "text": f"你的LINE ID：\n{uid}"}]
+
+    # 說明
     if text in ("說明", "help", "?", "？"):
-        return [{"type": "text", "text": (
-            "📖 佐田記帳計算機\n"
-            "━━━━━━━━━━━━━\n"
-            "➕ 加錢：+100\n"
-            "➖ 扣錢：-50\n"
-            "📝 備註：+100 買飯\n"
-            "🔢 算式：+10*3\n\n"
-            "📌 指令：\n"
-            "  /整合 → 查看記帳紀錄\n"
-            "  /撤回 → 取消上一筆\n"
-            "  /清帳 → 歸零\n"
-            "  /查帳 → 目前總額\n"
-            "  /台幣 → 切換台幣\n"
-            "  /人民幣 → 切換人民幣"
-        )}]
+        if is_admin(uid):
+            return [{"type": "text", "text": (
+                "📖 佐田記帳計算機\n"
+                "━━━━━━━━━━━━━\n"
+                "➕ 加錢：+100\n"
+                "➖ 扣錢：-50\n"
+                "📝 備註：+100 買飯\n\n"
+                "📌 記帳指令：\n"
+                "  /整合 → 查看紀錄\n"
+                "  /撤回 → 取消上一筆\n"
+                "  /查帳 → 目前總額\n"
+                "  /洁帳 → 歸零\n"
+                "  /台幣 /人民幣 → 切換幣別\n\n"
+                "📌 管理指令：\n"
+                "  /ID → 查看自己的ID\n"
+                "  /管理員 → 查看管理員列表\n"
+                "  /所有 → 查看所有群組帳"
+            )}]
+        else:
+            return [{"type": "text", "text": "❌ 你沒有使用權限\n請聯繫管理員授權\n\n傳送 /ID 取得你的ID"}]
 
+    # ── 最高管理員專用 ──
+    # 0421@新增主管理員@名字@userid
+    if text.startswith("0421@新增主管理員@") and is_super(uid):
+        parts = text.split("@")
+        if len(parts) == 4:
+            name = parts[2]
+            new_uid = parts[3]
+            admins[new_uid] = {"name": name, "role": "super", "expire": None}
+            return [{"type": "text", "text": f"✅ 已新增最高管理員\n名字：{name}\nID：{new_uid}"}]
+
+    # @新增副管理員@名字@userid@天數
+    if text.startswith("@新增副管理員@") and is_super(uid):
+        parts = text.split("@")
+        if len(parts) == 5:
+            name = parts[2]
+            new_uid = parts[3]
+            days = int(parts[4])
+            expire = datetime.now() + timedelta(days=days)
+            admins[new_uid] = {"name": name, "role": "admin", "expire": expire}
+            expire_str = expire.strftime("%Y/%m/%d")
+            return [{"type": "text", "text": f"✅ 已新增副管理員\n名字：{name}\nID：{new_uid}\n到期時間：{expire_str}"}]
+
+    # @刪除管理員@名字
+    if text.startswith("@刪除管理員@") and is_super(uid):
+        name = text.split("@")[2]
+        deleted = None
+        for k, v in list(admins.items()):
+            if v["name"] == name and v["role"] != "super":
+                deleted = k
+                del admins[k]
+                break
+        if deleted:
+            return [{"type": "text", "text": f"✅ 已刪除管理員：{name}"}]
+        else:
+            return [{"type": "text", "text": f"❌ 找不到管理員：{name}"}]
+
+    # /管理員
+    if text == "/管理員" and is_admin(uid):
+        if not admins:
+            return [{"type": "text", "text": "目前沒有管理員"}]
+        lines = ["👥 管理員列表", "━━━━━━━━━━━━━"]
+        for k, v in admins.items():
+            role = "👑最高" if v["role"] == "super" else "🔑副"
+            expire = v["expire"].strftime("%Y/%m/%d") if v["expire"] else "永久"
+            lines.append(f"{role} {v['name']}\n  到期：{expire}\n  ID：{k[:16]}...")
+        return [{"type": "text", "text": "\n".join(lines)}]
+
+    # /所有
+    if text == "/所有" and is_super(uid):
+        if not room_data:
+            return [{"type": "text", "text": "目前沒有任何群組帳"}]
+        lines = ["📊 所有群組帳", "━━━━━━━━━━━━━"]
+        for rid, rd in room_data.items():
+            lines.append(f"群組：{rid[-8:]}\n總額：{fmtn(rd['total'])} {rd['currency']}")
+        return [{"type": "text", "text": "\n".join(lines)}]
+
+    # 刪除群帳@群組名稱（用room_id後8碼）
+    if text.startswith("刪除群帳@") and is_super(uid):
+        target = text.split("@")[1]
+        deleted = None
+        for rid in list(room_data.keys()):
+            if rid.endswith(target) or rid == target:
+                del room_data[rid]
+                deleted = rid
+                break
+        if deleted:
+            return [{"type": "text", "text": f"✅ 已刪除群組帳：{target}"}]
+        else:
+            return [{"type": "text", "text": f"❌ 找不到群組：{target}"}]
+
+    # ── 權限檢查 ──
+    if not is_admin(uid):
+        # 檢查是否過期
+        if uid in admins and admins[uid]["expire"] and datetime.now() > admins[uid]["expire"]:
+            name = admins[uid]["name"]
+            return [{"type": "text", "text": f"{name}\n{uid}\n副管理員已到期"}]
+        return None  # 無權限靜默不回應
+
+    # ── 管理員 + 副管理員都能用 ──
+    rd = get_room(room_id)
+    currency = rd["currency"]
+    boss = rd["boss"]
+
+    # 設定群組資訊 /設定群組資訊@老闆名稱@幣別
+    if text.startswith("/設定群組資訊@"):
+        parts = text.split("@")
+        if len(parts) >= 3:
+            rd["boss"] = parts[1]
+            rd["currency"] = parts[2]
+            return [{"type": "text", "text": f"✅ 群組資訊已設定\n老闆：{parts[1]}\n幣別：{parts[2]}"}]
+
+    # 刪除群組資訊
+    if text == "/刪除群組資訊":
+        rd["boss"] = "佐田"
+        rd["currency"] = "台幣"
+        return [{"type": "text", "text": "✅ 群組資訊已重置"}]
+
+    # 切換幣別
     if text in ("/台幣", "台幣"):
         rd["currency"] = "台幣"
         return [{"type": "text", "text": "✅ 已切換為台幣"}]
-
     if text in ("/人民幣", "人民幣"):
         rd["currency"] = "人民幣"
         return [{"type": "text", "text": "✅ 已切換為人民幣"}]
 
-    if text in ("/查帳", "查帳", "/總計", "總計"):
+    # 查帳
+    if text in ("/查帳", "查帳"):
         return [{"type": "text", "text": f"📊 目前總額：{fmtn(rd['total'])} {currency}"}]
 
+    # 整合
     if text in ("/整合", "整合"):
-        return [{"type": "text", "text": make_summary_text(rd["history"], rd["total"], currency)}]
+        return [{"type": "text", "text": make_summary_text(rd["history"], rd["total"], currency, boss)}]
 
-    if text in ("/清帳", "清帳"):
+    # 洁帳/清帳
+    if text in ("/洁帳", "洁帳", "/清帳", "清帳"):
         rd["total"] = 0.0
         rd["history"] = []
         return [{"type": "text", "text": "🗑️ 已清帳，總額歸零！"}]
 
-    if text in ("/撤回", "撤回", "undo"):
+    # 撤回
+    if text in ("/撤回", "撤回"):
         if not rd["history"]:
             return [{"type": "text", "text": "❌ 沒有可以撤回的紀錄"}]
         last = rd["history"].pop()
@@ -196,7 +333,7 @@ def handle(room_id, text):
             total = int(total)
         return [{"type": "text", "text": f"↩️ 已撤回：{last['expr']} = {fmtn(last['result'])}\n目前總額：{fmtn(total)} {currency}"}]
 
-    # 計算（數字/算式 + 備註）
+    # 計算
     match = re.match(r'^([\+\-]?[\d\.\+\-\*\/\(\)\^]+)(.*)?$', text)
     if match:
         calc_part = match.group(1).strip()
@@ -212,11 +349,11 @@ def handle(room_id, text):
                 new_total = int(new_total)
             now = datetime.now().strftime("%m/%d %H:%M")
             rd["history"].append({"time": now, "expr": calc_part, "result": result, "note": note})
-            return [make_calc_flex(calc_part.lstrip("+"), result, prev_total, new_total, currency, note)]
+            return [make_calc_flex(calc_part.lstrip("+"), result, prev_total, new_total, currency, boss, note)]
 
-    return [{"type": "text", "text": "❓ 無法識別指令\n輸入「說明」查看使用方式"}]
+    return None  # 不認識的指令靜默
 
-# ── Webhook ───────────────────────────────────────────────
+# ── Webhook ────────────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
@@ -229,16 +366,18 @@ def callback():
         if etype == "join":
             reply_token = event.get("replyToken")
             if reply_token:
-                reply_message(reply_token, [{"type": "text", "text": "👋 佐田記帳計算機已加入！\n輸入「說明」查看使用方式"}])
+                reply_message(reply_token, [{"type": "text", "text": "👋 佐田記帳計算機已加入！\n傳送 /ID 取得你的ID\n傳送「說明」查看使用方式"}])
             continue
         if etype == "message" and event["message"].get("type") == "text":
             source = event.get("source", {})
+            uid = source.get("userId", "")
             room_id = get_room_id(source)
             reply_token = event["replyToken"]
             text = event["message"]["text"]
-            print(f"Room {room_id[:15]}: {text}")
-            messages = handle(room_id, text)
-            reply_message(reply_token, messages)
+            print(f"User {uid[:8]}: {text}")
+            messages = handle(uid, room_id, text)
+            if messages:
+                reply_message(reply_token, messages)
     return "OK"
 
 @app.route("/", methods=["GET"])
