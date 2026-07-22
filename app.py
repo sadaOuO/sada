@@ -352,7 +352,7 @@ def handle(uid, room_id, text):
         return [{"type": "text", "text": f"↩️ 已撤回：{last['expr']} = {fmtn(last['result'])}\n目前總額：{fmtn(total)} {currency}"}]
 
     # 計算
-    match = re.match(r'^([\+\-]?[\d\.\+\-\*\/\(\)\^]+)(.*)?$', text)
+    match = re.match(r'^([\+\-][\d\.\+\-\*\/\(\)\^]+)(.*)?$', text)
     if match:
         calc_part = match.group(1).strip()
         note = match.group(2).strip() if match.group(2) else ""
