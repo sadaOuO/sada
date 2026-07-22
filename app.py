@@ -30,6 +30,9 @@ print(f"TOKEN length: {len(ACCESS_TOKEN)}")
 admins = {}
 if SUPER_ADMIN_ID:
     admins[SUPER_ADMIN_ID] = {"name": "佐田", "role": "super", "expire": None}
+    print(f"[INIT] SUPER_ADMIN_ID 已載入：{SUPER_ADMIN_ID}")
+else:
+    print("[WARN] 未設定 SUPER_ADMIN_ID，將沒有最高管理員！")
 
 # 群組資料 { room_id: {"total": 0.0, "history": [], "currency": "台幣", "boss": "", "enabled": True} }
 room_data = {}
@@ -209,21 +212,28 @@ def handle(uid, room_id, text):
         parts = text.split("@")
         if len(parts) == 4:
             name = parts[2]
-            new_uid = parts[3]
+            new_uid = parts[3].strip()
             admins[new_uid] = {"name": name, "role": "super", "expire": None}
             return [{"type": "text", "text": f"✅ 已新增最高管理員\n名字：{name}\nID：{new_uid}"}]
+        else:
+            return [{"type": "text", "text": "❌ 格式錯誤\n正確格式：\n0421@新增主管理員@名字@userid"}]
 
     # @新增副管理員@名字@userid@天數
     if text.startswith("@新增副管理員@") and is_super(uid):
         parts = text.split("@")
         if len(parts) == 5:
             name = parts[2]
-            new_uid = parts[3]
-            days = int(parts[4])
+            new_uid = parts[3].strip()
+            try:
+                days = int(parts[4])
+            except ValueError:
+                return [{"type": "text", "text": "❌ 天數必須是數字\n正確格式：\n@新增副管理員@名字@userid@天數"}]
             expire = datetime.now() + timedelta(days=days)
             admins[new_uid] = {"name": name, "role": "admin", "expire": expire}
             expire_str = expire.strftime("%Y/%m/%d")
             return [{"type": "text", "text": f"✅ 已新增副管理員\n名字：{name}\nID：{new_uid}\n到期時間：{expire_str}"}]
+        else:
+            return [{"type": "text", "text": f"❌ 格式錯誤（需要{5}段，目前{len(parts)}段）\n正確格式：\n@新增副管理員@名字@userid@天數\n例如：\n@新增副管理員@AK@U開頭的ID@30"}]
 
     # @刪除管理員@名字
     if text.startswith("@刪除管理員@") and is_super(uid):
@@ -374,7 +384,7 @@ def callback():
             room_id = get_room_id(source)
             reply_token = event["replyToken"]
             text = event["message"]["text"]
-            print(f"User {uid[:8]}: {text}")
+            print(f"User {uid} | is_admin={is_admin(uid)} | is_super={is_super(uid)} | text={text}")
             messages = handle(uid, room_id, text)
             if messages:
                 reply_message(reply_token, messages)
