@@ -51,8 +51,10 @@ def get_room_id(source):
         return "user_" + source.get("userId", "unknown")
 
 def fmtn(n):
-    if isinstance(n, float) and n.is_integer():
-        n = int(n)
+    if isinstance(n, float):
+        n = round(n, 2)
+        if n.is_integer():
+            n = int(n)
     return f"{n:,}"
 
 # ── 權限檢查 ───────────────────────────────────────────────
@@ -96,6 +98,12 @@ def reply_message(reply_token, messages):
 def make_calc_flex(expr, result, prev_total, new_total, currency, boss, note=""):
     sign = "+" if result >= 0 else ""
     color_result = "#FF6B35" if result >= 0 else "#2196F3"
+    if new_total >= 0:
+        total_label = f"目前欠{boss}"
+        total_display = new_total
+    else:
+        total_label = f"{boss}欠"
+        total_display = -new_total
 
     bubble = {
         "type": "bubble", "size": "kilo",
@@ -120,8 +128,8 @@ def make_calc_flex(expr, result, prev_total, new_total, currency, boss, note="")
                 ], "margin": "sm"},
                 {"type": "separator", "margin": "md"},
                 {"type": "box", "layout": "horizontal", "contents": [
-                    {"type": "text", "text": f"目前欠{boss}", "size": "sm", "weight": "bold", "flex": 1},
-                    {"type": "text", "text": f"{fmtn(new_total)} {currency}", "size": "sm", "weight": "bold", "color": "#FF6B35", "align": "end", "flex": 2}
+                    {"type": "text", "text": total_label, "size": "sm", "weight": "bold", "flex": 1},
+                    {"type": "text", "text": f"{fmtn(total_display)} {currency}", "size": "sm", "weight": "bold", "color": "#FF6B35", "align": "end", "flex": 2}
                 ], "margin": "md"},
                 {"type": "box", "layout": "horizontal", "contents": [
                     {"type": "text", "text": "備註", "size": "sm", "color": "#888888", "flex": 1},
@@ -137,7 +145,7 @@ def make_calc_flex(expr, result, prev_total, new_total, currency, boss, note="")
             "paddingAll": "8px"
         }
     }
-    return {"type": "flex", "altText": f"計算結果：欠{boss} {fmtn(new_total)} {currency}", "contents": bubble}
+    return {"type": "flex", "altText": f"計算結果：{total_label} {fmtn(total_display)} {currency}", "contents": bubble}
 
 # ── 整合文字 ───────────────────────────────────────────────
 def make_summary_text(history, total, currency, boss):
