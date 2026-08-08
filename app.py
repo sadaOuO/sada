@@ -229,11 +229,12 @@ def make_calc_flex(expr, result, prev_total, new_total, currency, boss, note="")
     return {"type": "flex", "altText": f"計算結果：{total_label} {fmtn(total_display)} {currency}", "contents": bubble}
 
 # ── 整合文字 ───────────────────────────────────────────────
-def make_summary_text(history, total, currency, boss):
+def make_summary_text(history, total, currency, boss, limit=15, title="📋 記帳整合"):
     if not history:
         return f"目前沒有紀錄 📭\n總額：{fmtn(total)} {currency}"
-    lines = ["📋 記帳整合", "━━━━━━━━━━━━━"]
-    for i, h in enumerate(history[-15:]):
+    shown = history if limit is None else history[-limit:]
+    lines = [title, "━━━━━━━━━━━━━"]
+    for i, h in enumerate(shown):
         note_str = f" 📝{h['note']}" if h.get('note') else ""
         sign = "+" if h['result'] >= 0 else ""
         lines.append(f"{i+1}. {h['time']}｜{h['expr']}={fmtn(h['result'])}{note_str}")
@@ -273,7 +274,7 @@ def handle(uid, room_id, text):
         return [{"type": "text", "text": f"你的LINE ID：\n{uid}"}]
 
     # 說明
-    if text in ("說明", "help", "?", "？"):
+    if text in ("說明", "help"):
         if is_admin(uid):
             return [{"type": "text", "text": (
                 "📖 佐田記帳計算機\n"
@@ -406,11 +407,11 @@ def handle(uid, room_id, text):
         return [{"type": "text", "text": "✅ 群組資訊已重置"}]
 
     # 切換幣別
-    if text in ("/台幣", "台幣"):
+    if text == "/台幣":
         rd["currency"] = "台幣"
         save_room(room_id)
         return [{"type": "text", "text": "✅ 已切換為台幣"}]
-    if text in ("/人民幣", "人民幣"):
+    if text == "/人民幣":
         rd["currency"] = "人民幣"
         save_room(room_id)
         return [{"type": "text", "text": "✅ 已切換為人民幣"}]
@@ -458,6 +459,20 @@ def handle(uid, room_id, text):
                 new_total = int(new_total)
             now = datetime.now().strftime("%m/%d %H:%M")
             rd["history"].append({"time": now, "expr": calc_part, "result": result, "note": note})
+
+            # 滿 100 筆自動整合並歸零明細（總額保留、繼續累計）
+            if len(rd["history"]) >= 100:
+                archive_text = make_summary_text(rd["history"], new_total, currency, boss,
+                                                   limit=None, title="🗂️ 已滿100筆，自動整合封存")
+                rd["history"] = []
+                save_room(room_id)
+                notice = f"✅ 已自動整合並清空明細\n總額 {fmtn(new_total)} {currency} 已保留，從現在重新記錄新的一批"
+                return [
+                    make_calc_flex(calc_part.lstrip("+"), result, prev_total, new_total, currency, boss, note),
+                    {"type": "text", "text": archive_text},
+                    {"type": "text", "text": notice},
+                ]
+
             save_room(room_id)
             return [make_calc_flex(calc_part.lstrip("+"), result, prev_total, new_total, currency, boss, note)]
 
