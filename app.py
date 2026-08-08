@@ -287,7 +287,7 @@ def handle(uid, room_id, text):
                 "  /撤回 → 取消上一筆\n"
                 "  /查帳 → 目前總額\n"
                 "  /洁帳 → 歸零\n"
-                "  /台幣 /人民幣 → 切換幣別\n\n"
+                "  /台幣 /人民幣 /美金... → 切換幣別\n\n"
                 "📌 管理指令：\n"
                 "  /ID → 查看自己的ID\n"
                 "  /管理員 → 查看管理員列表\n"
@@ -390,7 +390,7 @@ def handle(uid, room_id, text):
     currency = rd["currency"]
     boss = rd["boss"]
 
-    # 設定群組資訊 /設定群組資訊@老闆名稱@幣別
+    # 設定群組資訊 /設定群組資訊@老闆名稱@幣別 或 /設定群組資訊@老闆名稱
     if text.startswith("/設定群組資訊@"):
         parts = text.split("@")
         if len(parts) >= 3:
@@ -398,6 +398,10 @@ def handle(uid, room_id, text):
             rd["currency"] = parts[2]
             save_room(room_id)
             return [{"type": "text", "text": f"✅ 群組資訊已設定\n老闆：{parts[1]}\n幣別：{parts[2]}"}]
+        elif len(parts) == 2 and parts[1]:
+            rd["boss"] = parts[1]
+            save_room(room_id)
+            return [{"type": "text", "text": f"✅ 老闆名稱已設定為：{parts[1]}"}]
 
     # 刪除群組資訊
     if text == "/刪除群組資訊":
@@ -406,15 +410,13 @@ def handle(uid, room_id, text):
         save_room(room_id)
         return [{"type": "text", "text": "✅ 群組資訊已重置"}]
 
-    # 切換幣別
-    if text == "/台幣":
-        rd["currency"] = "台幣"
+    # 切換幣別（通用：/任何字+幣 或 /任何字+金，例如 /台幣 /人民幣 /馬幣 /新幣 /美金）
+    currency_match = re.match(r'^/([\u4e00-\u9fff]{1,6}(?:幣|金))$', text)
+    if currency_match:
+        new_currency = currency_match.group(1)
+        rd["currency"] = new_currency
         save_room(room_id)
-        return [{"type": "text", "text": "✅ 已切換為台幣"}]
-    if text == "/人民幣":
-        rd["currency"] = "人民幣"
-        save_room(room_id)
-        return [{"type": "text", "text": "✅ 已切換為人民幣"}]
+        return [{"type": "text", "text": f"✅ 已切換為{new_currency}"}]
 
     # 查帳
     if text in ("/查帳", "查帳"):
@@ -491,7 +493,7 @@ def callback():
         if etype == "join":
             reply_token = event.get("replyToken")
             if reply_token:
-                reply_message(reply_token, [{"type": "text", "text": "👋 佐田記帳計算機已加入！\n傳送 /ID 取得你的ID\n傳送「說明」查看使用方式"}])
+                reply_message(reply_token, [{"type": "text", "text": "👋 佐田記帳計算機已加入！\n傳送 /ID 取得你的ID"}])
             continue
         if etype == "message" and event["message"].get("type") == "text":
             source = event.get("source", {})
