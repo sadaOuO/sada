@@ -6,6 +6,7 @@ import json
 import math
 import re
 import os
+import time
 import requests
 from datetime import datetime, timedelta
 
@@ -480,6 +481,21 @@ def handle(uid, room_id, text):
 
     return None  # 不認識的指令靜默
 
+# ── 防止同一則訊息被處理兩次（LINE 重送 webhook 時會發生）──────────
+_seen_events = {}  # event_id -> 收到時間
+
+def already_processed(event):
+    eid = event.get("webhookEventId") or (event.get("message") or {}).get("id")
+    if not eid:
+        return False
+    now = time.time()
+    for k in [k for k, t in _seen_events.items() if now - t > 600]:
+        del _seen_events[k]
+    if eid in _seen_events:
+        return True
+    _seen_events[eid] = now
+    return False
+
 # ── Webhook ────────────────────────────────────────────────
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -501,7 +517,11 @@ def callback():
             room_id = get_room_id(source)
             reply_token = event["replyToken"]
             text = event["message"]["text"]
-            print(f"User {uid} | is_admin={is_admin(uid)} | is_super={is_super(uid)} | text={text}")
+            redelivery = (event.get("deliveryContext") or {}).get("isRedelivery", False)
+            print(f"User {uid} | is_admin={is_admin(uid)} | is_super={is_super(uid)} | text={text} | evt={event.get('webhookEventId')} | redelivery={redelivery}")
+            if already_processed(event):
+                print(f"[SKIP] 重複的事件，已略過：{event.get('webhookEventId')}")
+                continue
             messages = handle(uid, room_id, text)
             if messages:
                 reply_message(reply_token, messages)
